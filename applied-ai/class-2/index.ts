@@ -37,31 +37,8 @@ const instructions = `
     Delegate independent tasks when doing so improves execution..
 `;
 const task = `
-    Create a folder named "recursive-agent-test".
-
-    The main agent (depth 0) MUST create exactly two sub-agents:
-
-    **Sub-agent A — Depth 1**
-    - Responsible for creating the "Backend" folder.
-    - Must delegate one task to another sub-agent at depth 2.
-    - That agent must delegate another task to an agent at depth 3.
-    - The depth 3 agent must delegate another task to an agent at depth 4.
-    - The depth 4 agent must create a "README.md" file inside the Backend folder.
-    
-    **Sub-agent B — Depth 1**
-    - Responsible for creating the "Client" folder.
-    - Must delegate one task to another sub-agent at depth 2.
-    - That agent must delegate another task to an agent at depth 3.
-    - The depth 3 agent must delegate another task to an agent at depth 4.
-    - The depth 4 agent must create an "index.html" file inside the Client folder.
-
-    **Rules:**
-    1. Every agent must delegate to exactly one child agent if its depth is less than 4.
-    2. No agent at depth 4 is allowed to create another sub-agent.
-    3. Every agent must perform its assigned task using the Bash tool.
-    4. Each child must return its result to its immediate parent.
-    5. The main agent must wait for both branches to finish.
-    6. Finally, verify the folder structure using Bash and report the agent hierarchy, IDs, and depths.
+      The client UI is looking very bad can you improve it add light and dark mode,
+      user modern ui but also make sure it does not looks like ai generated
     `;
 
   const parentContext = createContext("main-agent", {
@@ -160,102 +137,185 @@ const tools: ResponsesRequestToolFunction[] = [
 
 async function agentLoop(): Promise<string> {
   while (true) {
-    const stream = await openRouter.responses.send({
-      responsesRequest: {
-        model: MODEL,
-        instructions,
-        tools,
-        input,
-        stream: true,
-      },
-    });
+    try {
+      const stream = await openRouter.responses.send({
+        responsesRequest: {
+          model: MODEL,
+          instructions,
+          tools,
+          input,
+          stream: true,
+        },
+      });
 
-    console.log("main agent...")
+      console.log("main agent...");
 
-    let finalText = "";
-    const completedToolCalls: OutputFunctionCallItem[] = [];
-    let completedOutput: OpenResponsesResult["output"] = [];
+      let finalText = "";
+      const completedToolCalls: OutputFunctionCallItem[] = [];
+      let completedOutput: OpenResponsesResult["output"] = [];
 
-    for await (const event of stream){
-      // stream text to terminal
-      if(event.type === "response.output_text.delta"){
-        finalText += event.delta
-        process.stdout.write(event.delta)
-      }
-
-       // a complete tool call is available
-      if (event.type === "response.output_item.done") {
-        if (event.item.type === "function_call") {
-          completedToolCalls.push(event.item);
+      for await (const event of stream) {
+        if (event.type === "response.output_text.delta") {
+          finalText += event.delta;
+          process.stdout.write(event.delta);
         }
-      }
 
-      // response is complete
-      if (event.type === "response.completed") {
-        completedOutput = event.response.output;
-      }
-    }
-
-    input.push(...completedOutput.map(convertOutputItemToInput));
-
-    if (completedToolCalls.length === 0) {
-      return finalText
-    }
-
-    const results = await Promise.all(
-      completedToolCalls.map(async (toolCall) => {
-        let result: unknown;
-
-        switch(toolCall.name){
-          
-          case "getWeather": {
-            const city = parseSearchTerms(toolCall.arguments);
-            result = await getWeather(city);
-            break;
-          }
-
-          case "bash": {
-            const command  = parseBashArguments(toolCall.arguments)
-            result = await executeBashCommand(command);
-            break;
-          }
-
-          case "delegate_to_subagent" :{
-            const subTask = parseSubAgentArguments(toolCall.arguments)
-            result = await executeSubAgent(subTask, parentContext)
-            break;
-          }
-
-          case "plan_task": {
-            const args = JSON.parse(toolCall.arguments);
-            result = await planTask(args.userTask);
-            break;
-
+        if (event.type === "response.output_item.done") {
+          if (event.item.type === "function_call") {
+            completedToolCalls.push(event.item);
           }
         }
 
+        if (event.type === "response.completed") {
+          completedOutput = event.response.output;
+        }
+      }
 
-        const compactedOutput = await compactToolOutput(
-          parentContext.id, 
-          toolCall.name, 
-          result
-        )
+      input.push(
+        ...completedOutput.map(convertOutputItemToInput)
+      );
 
-        return {
-          type: "function_call_output" as const,
-          callId: toolCall.callId,
-          output: compactedOutput,
-        };
-      })
-    );
+      if (completedToolCalls.length === 0) {
+        return finalText;
+      }
 
-    input.push(...results);
+      const results = await Promise.all(
+        completedToolCalls.map(async (toolCall) => {
+          try {
+            let result: unknown;
+
+            switch (toolCall.name) {
+              case "getWeather": {
+                const city = parseSearchTerms(toolCall.arguments);
+                result = await getWeather(city);
+                break;
+              }
+
+              case "bash": {
+                const command = parseBashArguments(toolCall.arguments);
+                result = await executeBashCommand(command);
+                break;
+              }
+
+              case "delegate_to_subagent": {
+                const subTask = parseSubAgentArguments(toolCall.arguments);
+                result = await executeSubAgent(subTask, parentContext);
+                break;
+              }
+
+              case "plan_task": {
+                const args = JSON.parse(toolCall.arguments);
+                result = await planTask(args.userTask);
+                break;
+              }
+
+              default:
+                throw new Error(`Unknown tool: ${toolCall.name}`);
+            }
+
+            const compactedOutput = await compactToolOutput(
+              parentContext.id,
+              toolCall.name,
+              result
+            );
+
+            return {
+              type: "function_call_output" as const,
+              callId: toolCall.callId,
+              output: compactedOutput,
+            };
+
+          } catch (error) {
+            console.error(`Tool ${toolCall.name} failed:`, error);
+
+            return {
+              type: "function_call_output" as const,
+              callId: toolCall.callId,
+              output: JSON.stringify({
+                error: error instanceof Error
+                  ? error.message
+                  : "Unknown tool error",
+              }),
+            };
+          }
+        })
+      );
+
+      input.push(...results);
+
+    } catch (error) {
+      console.error("Agent loop error:", error);
+
+      console.log("Retrying agent...");
+    }
   }
 }
 
 agentLoop();
 
 
+
+
+// const instructions1 = `
+//     You are a main AI agent.
+// `;
+// const task1 = `
+//       What is the defination of quantum physics.
+//     `;
+
+//     const input1: InputsUnion1[] = [
+//   {
+//     role: "user",
+//     content: task1,
+//   }
+// ];
+
+// const agentLoop2 = async () => {
+//     const stream = await openRouter.responses.send({
+//       responsesRequest: {
+//         model: MODEL,
+//         instructions: instructions1,
+//         tools,
+//         input: input1,
+//         stream: true,
+//       },
+//     });
+//     console.log(instructions1, input1)
+
+//     console.log("main agent...")
+
+//     let finalText = "";
+//     const completedToolCalls: OutputFunctionCallItem[] = [];
+//     let completedOutput: OpenResponsesResult["output"] = [];
+
+//     for await (const event of stream){
+//       // stream text to terminal
+//       if(event.type === "response.output_text.delta"){
+//         finalText += event.delta
+//         process.stdout.write(event.delta)
+//       }
+      
+//       // a complete tool call is available
+//       if (event.type === "response.output_item.done") {
+//         if (event.item.type === "function_call") {
+//           completedToolCalls.push(event.item);
+//         }
+//       }
+      
+//       // response is complete
+//       if (event.type === "response.completed") {
+//         console.log(event.response.usage)
+//         completedOutput = event.response.output;
+//       }
+//     }
+
+//     input1.push(...completedOutput.map(convertOutputItemToInput));
+
+  
+
+// }
+
+// agentLoop2();
 
 
 // async function agentLoop(): Promise<string> {
