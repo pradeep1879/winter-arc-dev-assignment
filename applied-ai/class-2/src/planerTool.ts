@@ -63,6 +63,8 @@ export async function planTask(
     },
   });
 
+  console.log(`Plan Task Tool Called`)
+  
   const text = response.output
     .filter((item) => item.type === "message")
     .flatMap((item) =>
@@ -73,6 +75,7 @@ export async function planTask(
     .join("\n");
 
   const parsedPlan = JSON.parse(text);
+  console.log(`parsedPlan: ${parsedPlan}`)
 
   const plan = TaskPlanSchema.parse(parsedPlan);
 

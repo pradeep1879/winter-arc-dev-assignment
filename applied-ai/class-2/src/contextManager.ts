@@ -1,4 +1,3 @@
-
 type ToolOutput = {
   id: string;
   toolName: string;
@@ -73,11 +72,11 @@ export async function compactToolOutput(
 
   const serialized = JSON.stringify(output)
 
-  if (serialized.length <= threshold) {
+  if(serialized.length <= threshold){
     return serialized;
   }
-console.log("Compacting context:", agentId);
-console.log("Output size:", serialized.length);
+  console.log("Compacting context:", agentId);
+  console.log("Output size:", serialized.length);
 
   const reference = await offloadToolOutput(agentId, {
     id: crypto.randomUUID(),

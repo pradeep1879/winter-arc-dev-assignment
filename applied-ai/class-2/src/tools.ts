@@ -117,19 +117,16 @@ function getSubAgentTools(
 }
 
 
-
-
-
 const executeSubAgentTool = async (
   toolCall: OutputFunctionCallItem,
   context: AgentContext
 ) => {
-  console.log("\n========== EXECUTING TOOL ==========");
+  console.log("\n EXECUTING TOOL ");
   console.log("Agent:", context.id);
   console.log("Depth:", context.depth);
   console.log("Tool:", toolCall.name);
   console.log("Arguments:", toolCall.arguments);
-  console.log("====================================");
+  
 
   switch (toolCall.name) {
 
@@ -165,20 +162,13 @@ const executeSubAgentTool = async (
 
 
 
-
-export async function executeSubAgent(subTask: string, parentContext: AgentContext) {
-  console.log(`spawning a new sub-agent...`);
-
-  console.log("\n========== SPAWN REQUEST ==========");
-  console.log("Parent ID:", parentContext.id);
-  console.log("Parent depth:", parentContext.depth);
-  console.log("Max depth:", parentContext.maxDepth);
-  console.log("===================================\n");
-
+export async function executeSubAgent(
+  subTask: string,
+  parentContext: AgentContext
+) {
   if (parentContext.depth >= parentContext.maxDepth) {
     throw new Error("Maximum agent depth reached");
   }
-
 
   if (
     parentContext.budget.totalAgents! >=
@@ -187,7 +177,6 @@ export async function executeSubAgent(subTask: string, parentContext: AgentConte
     throw new Error("Maximum agent count reached");
   }
 
-  // reserve an agent slot before starting execution.
   parentContext.budget.totalAgents!++;
 
   const subAgentContext = createContext(
@@ -200,19 +189,6 @@ export async function executeSubAgent(subTask: string, parentContext: AgentConte
     }
   );
 
-  console.log("\n========== AGENT CREATED ==========");
-  console.log("Agent ID:", subAgentContext.id);
-  console.log("Parent ID:", subAgentContext.parentId);
-  console.log("Depth:", subAgentContext.depth);
-  console.log("Max Depth:", subAgentContext.maxDepth);
-  console.log("Can spawn children:",
-    subAgentContext.depth < subAgentContext.maxDepth
-  );
-  console.log("Task:", subTask);
-  console.log("Total agents:", subAgentContext.budget.totalAgents);
-  console.log("===================================\n");
-
-  // 2. Create its own conversation input
   const subAgentInput: InputsUnion1[] = [
     {
       role: "user",
@@ -220,64 +196,106 @@ export async function executeSubAgent(subTask: string, parentContext: AgentConte
     },
   ];
 
-console.log("Sub-agent context:", subAgentContext.id);
-console.log("Sub-agent task:", subTask);
+  let retries = 0;
+  const MAX_RETRIES = 3;
 
-while(true){
-  const response = await openRouter.responses.send({
-    responsesRequest:{
-      model: MODEL,
+  while (true) {
+    try {
+      const response = await openRouter.responses.send({
+        responsesRequest: {
+          model: MODEL,
+          instructions: `
+            You are a specialized sub-agent.
 
-      instructions: `
-        You are a specialized sub-agent.
+            Your agent ID: ${subAgentContext.id}
+            Your parent ID: ${subAgentContext.parentId}
+            Your depth: ${subAgentContext.depth}
+            Maximum depth: ${subAgentContext.maxDepth}
 
-        Your agent ID: ${subAgentContext.id}
-        Your parent ID: ${subAgentContext.parentId}
-        Your depth: ${subAgentContext.depth}
-        Maximum depth: ${subAgentContext.maxDepth}
+            Complete only the task assigned to you.
+            You can delegate independent subtasks.
+            Return your final result to your parent agent.
+          `,
+          input: subAgentInput,
+          tools: getSubAgentTools(subAgentContext),
+          stream: false,
+        },
+      });
 
-        Complete only the task assigned to you.
+      // Model response received successfully
+      retries = 0;
 
-        You can delegate independent subtasks
-        using delegate_to_subagent when available.
-
-        Return your final result to your parent agent.
-    `,
-      input: subAgentInput,
-      tools: getSubAgentTools(subAgentContext),
-      stream: false
-    }
-  })
-
-  subAgentInput.push(...response.output.map(convertOutputItemToInput))
-
-  const toolCalls = response.output.filter((item) => item.type === "function_call");
-
-   if (toolCalls.length === 0) {
-      return response.output
-        .filter((item) => item.type === "message")
-        .flatMap((item) =>
-          item.content
-            .filter((content) => content.type === "output_text")
-            .map((content) => content.text)
-        )
-        .join("\n");
-    }
-
-    for(const toolCall of toolCalls){
-      const rawResult = await executeSubAgentTool(toolCall, subAgentContext);
-
-      const result = await compactToolOutput(
-        subAgentContext.id,
-        toolCall.name,
-        rawResult
+      subAgentInput.push(
+        ...response.output.map(convertOutputItemToInput)
       );
 
-      subAgentInput.push({
-        type: "function_call_output",
-        callId: toolCall.callId,
-        output: JSON.stringify(result),
-      })
+      const toolCalls = response.output.filter(
+        (item) => item.type === "function_call"
+      );
+
+      if (toolCalls.length === 0) {
+        return response.output
+          .filter((item) => item.type === "message")
+          .flatMap((item) =>
+            item.content
+              .filter((content) => content.type === "output_text")
+              .map((content) => content.text)
+          )
+          .join("\n");
+      }
+
+      for (const toolCall of toolCalls) {
+        try {
+          const rawResult = await executeSubAgentTool(
+            toolCall,
+            subAgentContext
+          );
+
+          const result = await compactToolOutput(
+            subAgentContext.id,
+            toolCall.name,
+            rawResult
+          );
+
+          subAgentInput.push({
+            type: "function_call_output",
+            callId: toolCall.callId,
+            output: JSON.stringify(result),
+          });
+
+        } catch (error) {
+          console.error(
+            `[SUBAGENT TOOL ERROR] ${toolCall.name}:`,
+            error
+          );
+
+          subAgentInput.push({
+            type: "function_call_output",
+            callId: toolCall.callId,
+            output: JSON.stringify({
+              error: error instanceof Error
+                ? error.message
+                : "Unknown tool error",
+            }),
+          });
+        }
+      }
+
+    } catch (error) {
+      retries++;
+
+      console.error(
+        `[SUBAGENT ERROR] ${subAgentContext.id}`,
+        error
+      );
+
+      if (retries >= MAX_RETRIES) {
+        throw error;
+      }
+
+      await new Promise((resolve) =>
+        setTimeout(resolve, 2000 * retries)
+      );
     }
-} 
+  }
 }
